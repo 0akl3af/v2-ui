@@ -8,7 +8,7 @@ plain='\033[0m'
 cur_dir=$(pwd)
 
 # check root
-[[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
+[[ $EUID -ne 0 ]] && echo -e "${red}Error：${plain} This script must be run with the root user!\n" && exit 1
 
 # check os
 if [[ -f /etc/redhat-release ]]; then
@@ -26,11 +26,11 @@ elif cat /proc/version | grep -Eqi "ubuntu"; then
 elif cat /proc/version | grep -Eqi "centos|red hat|redhat"; then
     release="centos"
 else
-    echo -e "${red}未检测到系统版本，请联系脚本作者！${plain}\n" && exit 1
+    echo -e "${red}No system version detected, please contact the script author!${plain}\n" && exit 1
 fi
 
 if [ $(getconf WORD_BIT) != '32' ] && [ $(getconf LONG_BIT) != '64' ] ; then
-    echo "本软件不支持 32 位系统(x86)，请使用 64 位系统(x86_64)，如果检测有误，请联系作者"
+    echo "This software does not support 32-bit system (x86), please use 64-bit system (x86_64), if the detection is wrong, please contact the author"
     exit -1
 fi
 
@@ -46,17 +46,33 @@ fi
 
 if [[ x"${release}" == x"centos" ]]; then
     if [[ ${os_version} -le 6 ]]; then
-        echo -e "${red}请使用 CentOS 7 或更高版本的系统！${plain}\n" && exit 1
+        echo -e "${red}Please use CentOS 7 or higher!${plain}\n" && exit 1
     fi
 elif [[ x"${release}" == x"ubuntu" ]]; then
     if [[ ${os_version} -lt 16 ]]; then
-        echo -e "${red}请使用 Ubuntu 16 或更高版本的系统！${plain}\n" && exit 1
+        echo -e "${red}Please use Ubuntu 16 or higher!${plain}\n" && exit 1
     fi
 elif [[ x"${release}" == x"debian" ]]; then
     if [[ ${os_version} -lt 8 ]]; then
-        echo -e "${red}请使用 Debian 8 或更高版本的系统！${plain}\n" && exit 1
+        echo -e "${red}Please use Debian 8 or higher!${plain}\n" && exit 1
     fi
 fi
+
+confirm() {
+    if [[ $# > 1 ]]; then
+        echo && read -p "$1 [Default$2]: " temp
+        if [[ x"${temp}" == x"" ]]; then
+            temp=$2
+        fi
+    else
+        read -p "$1 [y/n]: " temp
+    fi
+    if [[ x"${temp}" == x"y" || x"${temp}" == x"Y" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
 
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
@@ -66,30 +82,105 @@ install_base() {
     fi
 }
 
+uninstall_old_v2ray() {
+    if [[ -f /usr/bin/v2ray/v2ray ]]; then
+        confirm "Old v2ray version detected, whether to uninstall, will remove /usr/bin/v2ray/ and /etc/systemd/system/v2ray.service" "Y"
+        if [[ $? != 0 ]]; then
+            echo "不卸载则无法安装 v2-ui"
+            exit 1
+        fi
+        echo -e "${green}v2-ui cannot be installed without uninstalling${plain}"
+        systemctl stop v2ray
+        rm /usr/bin/v2ray/ -rf
+        rm /etc/systemd/system/v2ray.service -f
+        systemctl daemon-reload
+    fi
+    if [[ -f /usr/local/bin/v2ray ]]; then
+        confirm "If you detect v2ray installed in other ways, do you want to uninstall it? v2-ui comes with the official v2ray kernel, so it is recommended to uninstall it to prevent conflicts with its port." "Y"
+        if [[ $? != 0 ]]; then
+            echo -e "${red}You have chosen not to uninstall, please make sure the other scripts installed v2ray and v2-ui by yourself ${green}The official v2ray kernel that comes with${red}No port conflicts${plain}"
+        else
+            echo -e "${green}Start uninstalling the v2ray installed by other means${plain}"
+            systemctl stop v2ray
+            bash <(curl https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh) --remove
+            systemctl daemon-reload
+        fi
+    fi
+}
+
 install_v2ray() {
-    echo -e "${green}开始安装or升级v2ray${plain}"
-    bash <(curl -L -s https://install.direct/go.sh)
+    uninstall_old_v2ray
+    echo -e "${green}Start installation or upgrade v2ray${plain}"
+    bash <(curl https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)
     if [[ $? -ne 0 ]]; then
-        echo -e "${red}v2ray安装或升级失败，请检查错误信息${plain}"
-        echo -e "${yellow}大多数原因可能是因为你当前服务器所在的地区无法下载 v2ray 安装包导致的，这在国内的机器上较常见，解决方式是手动安装 v2ray，具体原因还是请看上面的错误信息${plain}"
+        echo -e "${red}v2ray installation or upgrade failed, please check the error message${plain}"
+        echo -e "${yellow}Most of the reasons may be due to the region where your current server is located can not download the v2ray installation package, which is more common on domestic machines, the solution is to manually install v2ray, please see the error message above for the specific reasons${plain}"
         exit 1
     fi
+    echo "
+[Unit]
+Description=V2Ray Service
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+Environment=V2RAY_LOCATION_ASSET=/usr/local/share/v2ray/
+ExecStart=/usr/local/bin/v2ray -confdir /usr/local/etc/v2ray/
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+" > /etc/systemd/system/v2ray.service
+    if [[ ! -f /usr/local/etc/v2ray/00_log.json ]]; then
+        echo "{}" > /usr/local/etc/v2ray/00_log.json
+    fi
+    if [[ ! -f /usr/local/etc/v2ray/01_api.json ]]; then
+        echo "{}" > /usr/local/etc/v2ray/01_api.json
+    fi
+    if [[ ! -f /usr/local/etc/v2ray/02_dns.json ]]; then
+        echo "{}" > /usr/local/etc/v2ray/02_dns.json
+    fi
+    if [[ ! -f /usr/local/etc/v2ray/03_routing.json ]]; then
+        echo "{}" > /usr/local/etc/v2ray/03_routing.json
+    fi
+    if [[ ! -f /usr/local/etc/v2ray/04_policy.json ]]; then
+        echo "{}" > /usr/local/etc/v2ray/04_policy.json
+    fi
+    if [[ ! -f /usr/local/etc/v2ray/05_inbounds.json ]]; then
+        echo "{}" > /usr/local/etc/v2ray/05_inbounds.json
+    fi
+    if [[ ! -f /usr/local/etc/v2ray/06_outbounds.json ]]; then
+        echo "{}" > /usr/local/etc/v2ray/06_outbounds.json
+    fi
+    if [[ ! -f /usr/local/etc/v2ray/07_transport.json ]]; then
+        echo "{}" > /usr/local/etc/v2ray/07_transport.json
+    fi
+    if [[ ! -f /usr/local/etc/v2ray/08_stats.json ]]; then
+        echo "{}" > /usr/local/etc/v2ray/08_stats.json
+    fi
+    if [[ ! -f /usr/local/etc/v2ray/09_reverse.json ]]; then
+        echo "{}" > /usr/local/etc/v2ray/09_reverse.json
+    fi
+    systemctl daemon-reload
     systemctl enable v2ray
     systemctl start v2ray
 }
 
 close_firewall() {
-    if [[ x"${release}" == x"centos" ]]; then
-        systemctl stop firewalld
-        systemctl disable firewalld
-    elif [[ x"${release}" == x"ubuntu" ]]; then
-        ufw disable
-    elif [[ x"${release}" == x"debian" ]]; then
-        iptables -P INPUT ACCEPT
-        iptables -P OUTPUT ACCEPT
-        iptables -P FORWARD ACCEPT
-        iptables -F
-    fi
+   if [[ x"${release}" == x"centos" ]]; then
+       systemctl stop firewalld
+       systemctl disable firewalld
+   elif [[ x"${release}" == x"ubuntu" ]]; then
+       ufw disable
+   elif [[ x"${release}" == x"debian" ]]; then
+       iptables -P INPUT ACCEPT
+       iptables -P OUTPUT ACCEPT
+       iptables -P FORWARD ACCEPT
+       iptables -F
+   fi
 }
 
 install_v2-ui() {
@@ -98,49 +189,66 @@ install_v2-ui() {
     if [[ -e /usr/local/v2-ui/ ]]; then
         rm /usr/local/v2-ui/ -rf
     fi
-    last_version=$(curl -Ls "https://api.github.com/repos/sprov065/v2-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    echo -e "检测到v2-ui最新版本：${last_version}，开始安装"
-    wget -N --no-check-certificate -O /usr/local/v2-ui-linux.tar.gz https://github.com/sprov065/v2-ui/releases/download/${last_version}/v2-ui-linux.tar.gz
-    if [[ $? -ne 0 ]]; then
-        echo -e "${red}下载v2-ui失败，请确保你的服务器能够下载Github的文件，如果多次安装失败，请参考手动安装教程${plain}"
-        exit 1
+
+    if  [ $# == 0 ] ;then
+        last_version=$(curl -Ls "https://api.github.com/repos/sprov065/v2-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        if [[ ! -n "$last_version" ]]; then
+            echo -e "${red}Failure to detect v2-ui version may be due to exceeding Github API limitations, please try again later or manually specify v2-ui version to install${plain}"
+            exit 1
+        fi
+        echo -e "The latest version of v2-ui is detected：${last_version}，start installation"
+        wget -N --no-check-certificate -O /usr/local/v2-ui-linux.tar.gz https://github.com/sprov065/v2-ui/releases/download/${last_version}/v2-ui-linux.tar.gz
+        if [[ $? -ne 0 ]]; then
+            echo -e "${red}Downloading v2-ui failed, please make sure your server is able to download the Github file${plain}"
+            exit 1
+        fi
+    else
+        last_version=$1
+        url="https://github.com/sprov065/v2-ui/releases/download/${last_version}/v2-ui-linux.tar.gz"
+        echo -e "Start installation of v2-ui v$1"
+        wget -N --no-check-certificate -O /usr/local/v2-ui-linux.tar.gz ${url}
+        if [[ $? -ne 0 ]]; then
+            echo -e "${red}Download v2-ui v$1 failed, please make sure this version exists${plain}"
+            exit 1
+        fi
     fi
+
     tar zxvf v2-ui-linux.tar.gz
     rm v2-ui-linux.tar.gz -f
     cd v2-ui
-    chmod +x v2-ui
+    chmod +x v2-ui bin/v2ray-v2-ui bin/v2ctl
     cp -f v2-ui.service /etc/systemd/system/
     systemctl daemon-reload
     systemctl enable v2-ui
     systemctl start v2-ui
     echo -e "${green}v2-ui v${last_version}${plain} 安装完成，面板已启动，"
     echo -e ""
-    echo -e "如果是全新安装，默认网页端口为 ${green}65432${plain}，用户名和密码默认都是 ${green}admin${plain}"
-    echo -e "请自行确保此端口没有被其他程序占用，${yellow}并且确保 65432 端口已放行${plain}"
-    echo -e "若想将 65432 修改为其它端口，输入 v2-ui 命令进行修改，同样也要确保你修改的端口也是放行的"
+    echo -e "If it is a fresh installation, the default web port is ${green}65432${plain}, and the username and password are by default ${green}admin${plain}"
+    echo -e "Please make sure that this port is not occupied by another application, ${yellow} and that port 65432 is released${plain}"
+    echo -e "If you want to change 65432 to a different port, enter the v2-ui command to do so, and also make sure that the port you are changing is also released"
     echo -e ""
-    echo -e "如果是更新面板，则按你之前的方式访问面板"
+    echo -e "If it's an update panel, access the panel the way you did before"
     echo -e ""
     curl -o /usr/bin/v2-ui -Ls https://raw.githubusercontent.com/sprov065/v2-ui/master/v2-ui.sh
     chmod +x /usr/bin/v2-ui
-    echo -e "v2-ui 管理脚本使用方法: "
+    echo -e "How to use v2-ui Administration Script: "
     echo -e "----------------------------------------------"
-    echo -e "v2-ui              - 显示管理菜单 (功能更多)"
-    echo -e "v2-ui start        - 启动 v2-ui 面板"
-    echo -e "v2-ui stop         - 停止 v2-ui 面板"
-    echo -e "v2-ui restart      - 重启 v2-ui 面板"
-    echo -e "v2-ui status       - 查看 v2-ui 状态"
-    echo -e "v2-ui enable       - 设置 v2-ui 开机自启"
-    echo -e "v2-ui disable      - 取消 v2-ui 开机自启"
-    echo -e "v2-ui log          - 查看 v2-ui 日志"
-    echo -e "v2-ui update       - 更新 v2-ui 面板"
-    echo -e "v2-ui install      - 安装 v2-ui 面板"
-    echo -e "v2-ui uninstall    - 卸载 v2-ui 面板"
+    echo -e "v2-ui              - Show Admin Menu (more functions)"
+    echo -e "v2-ui start        - Launch v2-ui Panel"
+    echo -e "v2-ui stop         - Stop v2-ui Panel"
+    echo -e "v2-ui restart      - Restart v2-ui panel"
+    echo -e "v2-ui status       - View v2-ui Status"
+    echo -e "v2-ui enable       - Set v2-ui to boot up automatically"
+    echo -e "v2-ui disable      - Cancel v2-ui boot-up"
+    echo -e "v2-ui log          - View v2-ui logs"
+    echo -e "v2-ui update       - Update v2-ui Panel"
+    echo -e "v2-ui install      - Installing the v2-ui Panel"
+    echo -e "v2-ui uninstall    - Uninstall v2-ui Panel"
     echo -e "----------------------------------------------"
 }
 
-echo -e "${green}开始安装${plain}"
+echo -e "${green}Start Installation${plain}"
 install_base
-install_v2ray
+uninstall_old_v2ray
 close_firewall
-install_v2-ui
+install_v2-ui $1
